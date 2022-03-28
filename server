@@ -1,0 +1,772 @@
+/*
+ ===================================================================================
+ Name        : server.c
+ Author      : Elad&Yael
+ Description : manage clients with connection of TCP and UDP.
+			   recive TCP messages and send TCP & Multicast messages to the client.
+ ===================================================================================
+ */
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include <unistd.h>
+#include <sys/types.h>
+#include <sys/select.h>
+#include <sys/socket.h>
+#include <sys/time.h>
+#include <netinet/in.h>
+#include <arpa/inet.h>
+#include <errno.h>
+#include <pthread.h>
+#include <time.h>
+/*	SENDER		*/
+
+#define BUFF_SIZE 1024
+#define CATEGORIES 3
+#define PORTUDP 6000
+#define PORTTCP 12345
+#define MULTICASTG1 "224.4.0.5"
+#define MULTICASTG2 "224.4.0.6"
+#define MULTICASTG3 "224.4.0.7"
+
+/*messages we send*/
+#define HELLOACK 0
+#define INFOACK 1
+#define QUESTION 2
+#define FIN 3
+#define INVALIDCOMMAND 4
+
+/*messages we receive*/
+#define HELLO 0
+#define INFO 1
+#define ANSWER 2
+#define QUIT 3
+#define FIRSTQ 4
+
+/* A linked list node */
+
+//categories
+typedef struct Categories {
+    int CategoryFD;
+    int CategoryNumber;
+    struct sockaddr_in category;
+    struct Categories *next;
+} category_udp;
+
+//clients
+typedef struct tcpClients {
+    int clientFD;
+    int clientID;
+    int clientCAT;
+    int clientAge;
+    char* clientNickName;
+    int clientNickNameSize;
+    pthread_t th;
+    struct sockaddr_in client;
+    struct tcpClients *next;
+} tcpClient;
+
+
+void* FirstConnection();
+int winnerCalc(int cat_no);
+void scoreCalc(int cat_no);
+void* ClientManagment(void* client);
+void shutdown_and_goodbye();
+void invalid_command(int type, tcpClient *client);
+void removeClinet(tcpClient* del);
+void releasecategory_udp();
+void releaseTCPclients();
+
+/*global variables and questions*/
+category_udp *head = NULL, *temp, *temp2 , *temps[3] ;
+tcpClient *TCPhead = NULL, *Ttemp = NULL, *Ttemp2 = NULL;
+int welcome_socket , noOfClients = 0 ,portTCP, qFlaf = 1 ,flag_calc = 1 ,flag_send[3] = {0} ;
+uint16_t  temp16, portUDP[3] = {PORTUDP,PORTUDP+1,PORTUDP+2};
+uint32_t multiCastG[3] , temp32;
+int temp_all_answers[3] = {0,0,0},flag_firstQ[3] = {0,0,0} ;
+struct sockaddr_in client_addr;
+pthread_mutex_t lock;
+pthread_t welcome_th;
+char* Q1[] = {"what is the number is the most identified with Michael Jorden?","How many appearances had Yaniv Kattan in the national team of Israel?","How many squares are in Chess board?",
+				"How many goals did AC MILAN scored in the 1994 Champions league final?","What is Lebron James year of birth ?","What is the highest price that was spent on football player (in millions of euros)?",
+				"In which year Leonel Messi was born?","At what hight the basketball ring hang?","What is the record of point that have Omri Casspi achieved in NBA ?"};
+char* Q2[] = {"How many problems does JZ has in his song?","How many members were in QUEEN?","In what year did the BEATLES break up?","In what year Shiri Mimon represent Israel at the Eurovision?","How old was Israel in the Givatron song?", "where did Nadav Gedg end up in the Eurovision?","In what year Noa Kirel was born?","How many times has Israel won the Eurovision?","In what year Justin Biber was born?","In what year was 2pac murdered?"};
+char* Q3[] = {"What is the sum of the numbers from 1 to 10?","What are the 4 number after the dot of phi 3.___?","What is the sum of the numbers of cube?","20 * 55 = ?","What is the sum of the angels of Octagon?","What is the third root of 343?","What are the sizes of the angles in equilateral triangle?","How many prime number are between 1 to 10?","How many sides are at Tetrahedron?","How many squares are in Sudoku board?"};
+char** Q[] = {Q1,Q2,Q3};
+int A1[] = {23,31,64,4,1984,0,222,1978,3,36};
+int A2[] = {99,4,1970,2005,60,9,2003,4,1994,1996};
+int A3[] = {55,1415,42,1100,1080,7,60,4,4,81};
+int *A[3] = {A1,A2,A3};
+int q_now[3] = {0,0,0};
+int answers1[4] = {6000,6000,6000,6000};
+int answers2[4] = {6000,6000,6000,6000};
+int answers3[4] = {6000,6000,6000,6000};
+int *answers[] = {answers1,answers2,answers3};
+int num_p_in_cat[3] = {0,0,0};
+int S1[4] = {0,0,0,0};
+int S2[4] = {0,0,0,0};
+int S3[4] = {0,0,0,0};
+int *score[3] = {S1,S2,S3};
+int ID1[4] = {0,0,0,0};
+int ID2[4] = {0,0,0,0};
+int ID3[4] = {0,0,0,0};
+int *IDs[3] = {ID1,ID2,ID3};
+int i , j ,real_counter = 0 ,the_first[3]={0};
+int go_flag[3] = {0};
+unsigned char ttl = 32;
+uint16_t calc = 0 ;
+char *stra;
+
+//main func
+int main() {
+    int threadVal, one = 1;
+    struct sockaddr_in serv_addr;
+    memset(temps,'\0',3);
+    multiCastG[0] = inet_addr((const char *) MULTICASTG1);
+    multiCastG[1] = inet_addr((const char *) MULTICASTG2);
+    multiCastG[2] = inet_addr((const char *) MULTICASTG3);
+	//for each category we open an udp socket
+    for(i = 0; i < 3; i++) {
+        temp = (category_udp *)malloc(sizeof(category_udp));
+        if(!temp) {
+            printf("ERROR malloc category_udp\n");
+            shutdown_and_goodbye();
+            return 1;
+        }
+        temp -> CategoryNumber = i;
+        temp -> category.sin_family = AF_INET;
+        temp -> category.sin_port = htons(portUDP[i]);
+        temp->category.sin_addr.s_addr = multiCastG[i];
+        temp->CategoryFD = socket(AF_INET, SOCK_DGRAM, 0);
+        if(temp->CategoryFD < 0) {
+            perror("ERROR in opening UDP socket\n");
+            shutdown_and_goodbye();
+            return 1;
+        }
+		// set as multicast
+        setsockopt(temp -> CategoryFD, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl));
+        if(i == 0) {
+            head = temp;
+            temp2 = head;
+            head -> next = NULL;
+        } else {
+            temp2 -> next = temp;
+            temp2 = temp2 -> next;
+            temp = temp2;
+        }
+        temps[i] = temp;
+    }
+    // setup socket - set TCP !
+    welcome_socket = socket(AF_INET, SOCK_STREAM, 0);
+    if (welcome_socket < 0) {
+        perror("ERROR opening socket");
+        shutdown_and_goodbye();
+        exit(EXIT_FAILURE);
+    }
+
+    // setup server information
+    memset((char *) &serv_addr, 0, sizeof(serv_addr));
+
+    serv_addr.sin_family = AF_INET;
+    serv_addr.sin_addr.s_addr = htonl(INADDR_ANY);
+    serv_addr.sin_port = htons(PORTTCP); // tcp port
+    memset(serv_addr.sin_zero, '\0', sizeof(serv_addr.sin_zero));
+
+    // resolve binding issues in the os
+    setsockopt(welcome_socket,SOL_SOCKET,SO_REUSEADDR,(char *) &one,sizeof(int));
+
+    // bind the socket to an address
+    if (bind(welcome_socket, (struct sockaddr *) &serv_addr, sizeof(serv_addr)) < 0) {
+        perror("ERROR on binding");
+        shutdown_and_goodbye();
+        exit(EXIT_FAILURE);
+    }
+
+	//open thread for each client
+    threadVal = pthread_create(&welcome_th, NULL, FirstConnection, NULL);
+    if(threadVal != 0 ) {
+        perror("ERROR opening welcome thread\n");
+        shutdown_and_goodbye();
+        exit(EXIT_FAILURE);
+    }
+	//wait for all threads to finish.
+    pthread_join(welcome_th, NULL);
+    return EXIT_SUCCESS;
+}
+
+// welcome
+void* FirstConnection() {
+    int thVal, retVal, i;
+    char input[10], addr[INET_ADDRSTRLEN], buff[3];
+    tcpClient *cPtr;
+    socklen_t addr_size;
+    fd_set fds;
+    category_udp *wPtr;
+
+	//listen for connections on a socket
+    listen(welcome_socket, 100);
+
+    addr_size = sizeof(client_addr);
+
+	//
+    while(qFlaf) {
+        memset(input, '\0', 10);
+        printf("Please type q to quit\n");
+        FD_ZERO(&fds);
+        FD_SET(welcome_socket, &fds);
+        FD_SET(fileno(stdin), &fds);
+        retVal = select(FD_SETSIZE, &fds, NULL, NULL, NULL);
+		//check the select
+        if(retVal <= 0 && (errno != EINTR))
+        {
+            printf("ERROR in select, HELLO\n");
+            shutdown_and_goodbye();
+            qFlaf = 0;
+            pthread_exit(&welcome_th);
+        }
+        // checks if the welcome_socket is in the table
+        if(FD_ISSET(welcome_socket, &fds))
+        {
+            noOfClients++;
+			// open client socket for connection
+            Ttemp = (tcpClient*)malloc(sizeof(tcpClient));
+            if(Ttemp == NULL)
+            {
+                printf("ERROR allocating memory for tcp client\n");
+                shutdown_and_goodbye();
+                qFlaf = 0;
+                pthread_exit(&welcome_th);
+            }
+			// set the settings of the socket
+            Ttemp -> client.sin_family = AF_INET; //   IPv4
+            Ttemp -> client.sin_addr.s_addr = htonl(INADDR_ANY);
+            Ttemp -> client.sin_port = htons(portTCP);
+            Ttemp -> clientFD = accept(welcome_socket, (struct sockaddr *) &(Ttemp -> client), &addr_size);
+            // thread creating for each client
+            thVal = pthread_create(&(Ttemp -> th), NULL, ClientManagment, Ttemp);
+            if(thVal != 0)
+            {
+                printf("ERROR opening thread\n");
+                shutdown_and_goodbye();
+                qFlaf = 0;
+                pthread_exit(&welcome_th);
+            }
+            Ttemp -> next = NULL;
+			// linked list
+            if(noOfClients == 1)
+            {
+                TCPhead = Ttemp;
+                Ttemp2 = Ttemp;
+                Ttemp2 -> next = NULL;
+            } else
+            {
+                Ttemp2 -> next = Ttemp;
+                Ttemp2 = Ttemp;
+                Ttemp = Ttemp -> next;
+            }
+		// if we entered 'q' for quit
+        } else if (FD_ISSET(fileno(stdin), &fds))
+        {
+            scanf("%10s", input);
+            if(strlen(input) != 1)
+                input[0] = 0; ///so it will go to default
+            switch(input[0])
+            {
+                case 'q':
+                    printf("We are closing the server after user request,\nwe free all the memory and close all the sockets\n");
+                    shutdown_and_goodbye();
+                    qFlaf = 0;
+                    break;
+                default:
+                    printf("Please retry by enter a valid command\n");
+            } //switch
+        } //else if
+    } //while
+}
+
+// ClientManagment
+void* ClientManagment(void* client) {
+    int i=0, helloFlag = 1, retVal, byteCount, num_parts, alreadyHave = 0, tcpqFlag = 1, size0fanswer ,yesno, go = 0 ;
+    tcpClient *cl = (tcpClient*)client, *tPtr;
+    fd_set fds;
+    uint8_t commandType;
+    uint16_t catnum;
+    char buffer[BUFF_SIZE], inbox[BUFF_SIZE + 1];
+    category_udp *sPtr, *tempi;
+    //struct for Timeout in select
+    struct timeval timeout;
+
+    while(tcpqFlag) {
+        FD_ZERO(&fds);
+        FD_SET(cl -> clientFD , &fds);
+        if(helloFlag) { //the hello (connection) massage
+            //define the time for timeout
+            timeout.tv_sec = 10;
+            timeout.tv_usec = 0;
+		// both select waiting for clientFD
+            retVal = select(FD_SETSIZE, &fds, NULL, NULL, &timeout);
+        } else {
+            retVal = select(FD_SETSIZE, &fds, NULL, NULL, NULL);
+        }
+        if(retVal <= 0 && (errno != EINTR)) {
+            if(helloFlag) {
+                printf("Timeout - didn't received HELLO\nRemoving client\n");
+                removeClinet(cl);
+            }
+            break;
+        }
+		// if the fd is in the list
+        if(FD_ISSET(cl -> clientFD, &fds))
+        {
+            // receiving massage from client
+            if((byteCount = read(cl -> clientFD, inbox, BUFF_SIZE)) <= 0)
+            {
+                printf("client closed the connection\n");
+                removeClinet(cl);
+                tcpqFlag = 0;
+                break;
+            }
+			// take the first byte of the header to handle the massage
+            commandType = (uint8_t) inbox[0];
+            switch(commandType) {
+				// HELLO massage for sending the settings for the specific multiCast group
+                case HELLO:
+                    if(!helloFlag) {
+                        invalid_command(3, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    if(byteCount != 3) {
+                        invalid_command(6, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    if(inbox[1]) {
+                        invalid_command(6, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+					// refill the buffer in data to send
+                    helloFlag = 0;
+                    buffer[0] = HELLOACK;
+                    cl->clientCAT = inbox[2];
+                    num_p_in_cat[cl->clientCAT-1] ++ ;
+                    printf("catagory_no:%d\n",cl->clientCAT);
+                    temp16 = htons(portUDP[cl->clientCAT-1]);
+                    temp32 = htonl(multiCastG[cl->clientCAT-1]);
+                    memcpy(buffer + 1, &temp32, 4);
+                    memcpy(buffer + 5, &temp16, 2);
+					// send the buffer by TCP connection
+                    if(send(cl -> clientFD, &buffer, 7, 0) != 7) {
+                        printf("wrong amount of byte sent\n");
+                        removeClinet(cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    break;
+				// get the details from the client and send him an ACK
+                case INFO:
+                    if(helloFlag) {
+                        invalid_command(2, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    if(byteCount != 14) {
+                        invalid_command(6, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    /* age,sizename,name got from the client */
+                    cl->clientAge = inbox[2];
+                    int lenth = inbox[3];
+                    cl->clientNickNameSize = lenth;
+					stra = (char *) malloc(lenth + 1);
+					memcpy(stra, inbox +4 , lenth + 1 );
+					cl->clientNickName = stra;
+                    for (j = 0; j < 4; ++j) {
+                        if(IDs[cl->clientCAT-1][j] == 0)
+                        {
+                            cl->clientID = j;
+                            IDs[cl->clientCAT-1][j] = 1 ;
+                            break;
+                        }
+                    }
+					// refill the buffer in data to send
+                    printf("the name and the age of user id:%d are %s %d\n",cl->clientID,cl->clientNickName,cl->clientAge);
+                    memset(buffer, '\0', BUFF_SIZE);
+                    buffer[0] = INFOACK;
+                    buffer[1] = cl->clientID;
+                    buffer[2] = 0 ;
+					// send the buffer by TCP connection
+                    if((byteCount = send(cl -> clientFD, &buffer, 3 , 0)) != 3 ) {
+                        printf("INFOACK: wrong amount of byte sent\n");
+                        removeClinet(cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+					break;
+				// sends the first question in the multicast group
+                case FIRSTQ :
+					//waiting for client to connect (20 sec)
+                	the_first[cl->clientCAT-1]++;
+					// if the first client connect to the category the timer is set
+                	if(the_first[cl->clientCAT-1] == 1)
+                	{
+                		struct timeval current_time, after_time ,temp;
+                		gettimeofday(&current_time,NULL);
+                		do
+                		{
+                			gettimeofday(&after_time,NULL);
+                			temp.tv_sec = after_time.tv_sec-current_time.tv_sec;
+                		}while(temp.tv_sec < 20);
+                		go_flag[cl->clientCAT-1] = 1 ;
+                	}
+					// if more than 1 client connected and 20 sec passed we sending the first question
+                    if (num_p_in_cat[cl->clientCAT-1] > 1 && go_flag[cl->clientCAT-1] == 1)
+                    {
+                    	go_flag[cl->clientCAT-1] = 0;
+                        memset(buffer, '\0', BUFF_SIZE);
+                        buffer[0] = QUESTION;
+                        q_now[cl->clientCAT-1] ++ ;
+                        int size0fQ = strlen(Q[cl->clientCAT-1][q_now[cl->clientCAT-1]-1]);
+                        printf("sizeof = %d\n",size0fQ);
+                        buffer[1] = size0fQ;
+                        memcpy(buffer+2 ,Q[cl->clientCAT-1][q_now[cl->clientCAT-1]-1],size0fQ);
+                        printf("sending first Q\n");
+                        printf("q_now[cl->clientCAT-1]: %d", q_now[cl->clientCAT-1]);
+                        if(sendto(temps[cl->clientCAT-1]->CategoryFD,buffer,2+ size0fQ,0,
+                                               (struct sockaddr*) &temps[cl->clientCAT-1]->category,
+                                                       sizeof(temps[cl->clientCAT-1]->category)) != (2+size0fQ))
+                                                       {
+                            perror("FirstQ: wrong amount of byte sent\n"); // change
+                               removeClinet(cl);
+                               tcpqFlag = 0;
+                               break;
+                        }
+                    }
+					// only one client connected
+					else if (go_flag[cl->clientCAT-1] == 1)
+					{
+						go_flag[cl->clientCAT-1] = 0 ;
+						the_first[cl->clientCAT-1] = 0 ;
+						printf("go flag :%d , the first:%d",go_flag[cl->clientCAT-1],the_first[cl->clientCAT-1]);
+						invalid_command(7,cl);
+						tcpqFlag = 0;
+                        break;
+					}
+						break;
+				// the client answered the question
+                case ANSWER:
+
+                        if(helloFlag) {
+                            invalid_command(2, cl);
+                            tcpqFlag = 0;
+                            break;
+                        }
+						// waiting for all client to answer
+                        temp_all_answers[cl->clientCAT-1] ++ ;
+                        size0fanswer = inbox[2];
+                        printf("temp_all_answers: %d\n",temp_all_answers[cl->clientCAT]);
+                        calc = 0 ;
+                        for(i = 0 ; i < size0fanswer ; i++)
+                        {
+                        	calc *= 10;
+                        	calc += inbox[i+3] - 48 ;
+                        }
+                        answers[cl->clientCAT-1][cl->clientID] = calc;
+						// if all clients answered the question we calculate the results
+                        if(temp_all_answers[cl->clientCAT-1] == num_p_in_cat[cl->clientCAT-1]){
+                        	temp_all_answers[cl->clientCAT-1] = 0 ;
+                        	flag_send[cl->clientCAT-1] = 1 ;
+                        	scoreCalc(cl->clientCAT);
+                        }
+                        // send another question if all the clients answered & quesion asked < 5
+                        if((q_now[cl->clientCAT-1] != 5 && q_now[cl->clientCAT-1] < 10)  && flag_send[cl->clientCAT-1] == 1)
+                        {
+                        	flag_send[cl->clientCAT-1] = 0 ;
+                            memset(buffer, '\0', BUFF_SIZE);
+                            buffer[0] = QUESTION;
+							// refill the buffer in data of the question
+                            int size0fQ = strlen(Q[cl->clientCAT-1][q_now[cl->clientCAT-1]]);
+                            buffer[1] = size0fQ;
+                            memcpy(buffer+2 ,Q[cl->clientCAT-1][q_now[cl->clientCAT-1]],size0fQ);
+                            q_now[cl->clientCAT-1] ++ ;
+							// sends the buffer to the clients via multicast
+                            if(sendto(temps[cl->clientCAT-1]->CategoryFD,buffer,2+ size0fQ,0,
+                                      (struct sockaddr*) &temps[cl->clientCAT-1]->category,
+                                      sizeof(temps[cl->clientCAT-1]->category)) != (2+size0fQ))
+                            {
+                                perror("Questions: wrong amount of byte sent\n"); // change
+                                removeClinet(cl);
+                                tcpqFlag = 0;
+                                break;
+                            }
+                            break;
+                        }
+						// we asked 5 quesions and we want to announce who is / are the winner/s
+                        else if((q_now[cl->clientCAT-1] == 5 || q_now[cl->clientCAT-1] == 10) && flag_send[cl->clientCAT-1] == 1)
+                        {
+							// resetting all the settings
+							the_first[cl->clientCAT-1] = 0 ;
+							if(q_now[cl->clientCAT-1] == 10)
+                        	{
+								q_now[cl->clientCAT-1] = 0 ;
+							}
+                        	flag_send[cl->clientCAT-1] = 0;
+                            memset(buffer, '\0', BUFF_SIZE);
+							// refill the buffer in data of the winners
+                            buffer[0] = FIN;
+							// calculate the winner
+                            int winneris = winnerCalc(cl->clientCAT);
+							buffer[1] = winneris ;
+							// sends the buffer
+							if(sendto(temps[cl->clientCAT-1]->CategoryFD,buffer,2 ,0,
+									  (struct sockaddr*) &temps[cl->clientCAT-1]->category,
+									  sizeof(temps[cl->clientCAT-1]->category)) != 2)
+							{
+								printf("Winner: wrong amount of byte sent\n"); // change
+								removeClinet(cl);
+								tcpqFlag = 0;
+								break;
+							}
+                            break;
+                        }
+                        break;
+				// the server recive from the client if he want to continue or not
+                case QUIT:
+
+                    if(helloFlag) {
+                        invalid_command(2, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    if(byteCount != 2) {
+                        invalid_command(6, cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    yesno = inbox[1];
+					// if client want to disconnect
+                    if(yesno == 0) {
+                        removeClinet(cl);
+                        tcpqFlag = 0;
+                        break;
+                    }
+                    // Client want to continue
+                    break;
+                default:
+                    invalid_command(5, cl);
+            }//switch
+        }//if fd_isset
+    }//while 1
+}
+
+// func calc the score of each round at each category
+void scoreCalc(int cat_no)
+{
+    int min = 3001;
+    int temp[num_p_in_cat[cat_no-1]] ;
+    for ( i = 0; i < num_p_in_cat[cat_no-1]; i++)
+    {
+        temp[i] = abs(answers[cat_no-1][i]-A[cat_no-1][(q_now[cat_no-1]-1)]);
+        if(min > temp[i])
+        {
+            min = temp[i];
+        }
+        answers[cat_no-1][i] = 6000;
+    }
+    for ( i = 0; i <num_p_in_cat[cat_no-1] ; i++)
+    {
+        if(temp[i] == min)
+        {
+            score[cat_no-1][i] = score[cat_no-1][i] +1 ;
+        }
+    }
+}
+
+// func calc the winner/s of each category
+int winnerCalc(int cat_no)
+{
+    int max = -1 ;
+    int k = 1 ;
+    for ( i = 0; i < 4; ++i) {
+        if(score[cat_no-1][i] > max)
+        {
+            max = score[cat_no-1][i];
+        }
+    }
+    for ( i = 0; i < 4; ++i) {
+        k = k << 1;
+        if(score[cat_no-1][i] == max)
+        {
+            k = k|1;
+        }
+        score[cat_no-1][i] = 0 ;
+    }
+    return k ;
+}
+
+// remove the client from the server
+void removeClinet(tcpClient* del)
+{
+	printf("client id:%d been removed\n",del->clientID);
+    pthread_mutex_lock(&lock);
+    Ttemp = TCPhead;
+    IDs[del->clientCAT-1][del->clientID] = 0 ;
+    num_p_in_cat[del->clientCAT-1] -- ;
+    if(del == TCPhead) {
+        if(del -> next == NULL) {//if there is only one client
+            if(close(del -> clientFD) < 0)
+                perror("ERROR closing socket\n");
+            free(del);
+            noOfClients = 0;
+            TCPhead = NULL;
+        } else {
+            Ttemp2 = TCPhead -> next;
+            if(close(del -> clientFD) < 0)
+                perror("ERROR closing socket\n");
+            free(del);
+            noOfClients -- ; // noOfClients = 0 ??
+            TCPhead = Ttemp2;
+        }
+    } else {//if del != head
+        while(Ttemp != del) {
+            Ttemp2 = Ttemp; //holds the prev
+            Ttemp = Ttemp -> next;
+        }
+        Ttemp2 -> next = Ttemp -> next; //prev points to the next problem with NULL ?
+        noOfClients--;
+        if(close(del -> clientFD) < 0)
+            perror("ERROR closing TCP socket\n");
+        free(Ttemp);
+    }//else
+    pthread_mutex_unlock(&lock);
+
+
+}
+
+// func that get if there is an invalid command - if so we send massage to the client and remove him
+void invalid_command(int type , tcpClient *client)
+{
+    char *str, buffer[BUFF_SIZE];
+    int byteCount;
+    uint8_t len;
+    memset(buffer, '\0', BUFF_SIZE);
+    buffer[0] = INVALIDCOMMAND;
+    switch(type) {
+        case 1:
+            printf("Category number given does not exist\n");
+            str = "Category number given does not exist";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+        case 2:
+            printf("Hello did not sent yet from user and another message was received\n");
+            str = "Hello did not sent yet from user and another message was received";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+        case 3:
+            printf("More than one HELLO sent\n");
+            str = "More than one HELLO sent";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+        case 4:
+			str = "The server closed the connection";
+			len = strlen(str);
+			buffer[1] = len;
+			break;
+        case 5:
+            printf("Unknown command received\n");
+            str = "Unknown command received";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+        case 6:
+            printf("Wrong message format\n");
+            str = "Wrong message format";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+		case 7:
+			printf("There are not enough client at the category , Please try again later");
+            str = "There are not enough client at the category , Please try again later";
+            len = strlen(str);
+            buffer[1] = len;
+            break;
+    }//switch
+	// sends massage to the client according to the cases above
+    memcpy(buffer + 2, str, len);
+    if((byteCount = send(client -> clientFD, &buffer, 2 + len, 0)) < 0)
+        perror("ERROR sending invalid message\n");
+    if(type != 4){removeClinet(client);}
+}
+
+// func that release the category in case we turn off the server ( shutdown_and_goodbye())
+void releasecategory_udp() {
+    category_udp *uPtr = head, *uPtr2;
+    if(uPtr -> next == NULL) { //only one in the list
+        if(close(uPtr -> CategoryFD) < 0)
+            perror("ERROR closing TCP socket\n");
+        free(uPtr);
+    } else {
+        uPtr2 = uPtr -> next;
+        while(uPtr2 != NULL) {
+            if(close(uPtr -> CategoryFD) < 0)
+                perror("ERROR closing TCP socket\n");
+            free(uPtr);
+            uPtr = uPtr2;
+            uPtr2 = uPtr2 -> next;
+        }
+        if(close(uPtr -> CategoryFD) < 0)
+            perror("ERROR closing TCP socket\n");
+        free(uPtr);
+    }
+    printf("Released Categories list allocations\n");
+}
+
+// func that release the Clients in case we turn off the server ( shutdown_and_goodbye())
+void releaseTCPclients() {
+    tcpClient *aPtr = TCPhead, *aPtr2;
+    if(aPtr -> next == NULL) { // there is only one client
+        if(close(aPtr -> clientFD) < 0)
+            perror("ERROR closing TCP socket\n");
+        free(aPtr);
+    } else {
+        aPtr2 = aPtr -> next;
+        while(aPtr2 != NULL) { // close every client and free
+            if(close(aPtr -> clientFD) < 0)
+                perror("ERROR closing TCP socket\n");
+            free(aPtr);
+            free(aPtr->clientNickName);
+            aPtr = aPtr2;
+            aPtr2 = aPtr2 -> next;
+        }
+        free(aPtr);
+        free(aPtr->clientNickName);
+    }
+    printf("Released client list\n");
+    for ( i = 0; i < 4; ++i) {
+        IDs[i] = 0;
+    }
+}
+
+
+// func that turnoff the server and delete everything
+void shutdown_and_goodbye() {
+    tcpClient *ptr;
+    ptr = TCPhead;
+    if(TCPhead != NULL) {
+        while(ptr != NULL) {
+            pthread_cancel(ptr -> th);
+            ptr = ptr -> next;
+        }
+        releaseTCPclients();
+        TCPhead = NULL;
+    }
+    if(head != NULL) {
+        releasecategory_udp();
+        head = NULL;
+    }
+}
